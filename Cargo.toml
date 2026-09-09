@@ -3,7 +3,7 @@ name = "kannaka-crystal"
 version = "0.15.0"
 edition = "2021"
 description = "Kannaka Crystal — an experimental platform for informational materials and resonant memory systems"
-license = "MIT"
+license-file = "LICENSE"
 repository = "https://github.com/flaukowski/kannaka-crystal"
 
 [[bin]]
