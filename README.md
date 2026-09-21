@@ -13,9 +13,9 @@
 
 `kannaka-crystal` is an open research platform for discovering, cultivating, and studying **persistent informational structures** in simulated resonant media. Instead of bits → bytes → addresses → programs, it explores signals → resonance → interference → emergent structures → memory → meaning. Stable geometries that survive decay, noise, and dreaming get cataloged as **Crystal Primitives** — candidate computational building blocks for an alternative memory architecture.
 
-[![CI](https://github.com/flaukowski/kannaka-crystal/actions/workflows/ci.yml/badge.svg)](https://github.com/flaukowski/kannaka-crystal/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Space%20Child-blueviolet)]() [![Rust](https://img.shields.io/badge/rust-2021-orange)]() [![NATS](https://img.shields.io/badge/swarm-NATS-green)]()
+[![CI](https://github.com/kannaka-labs/kannaka-crystal/actions/workflows/ci.yml/badge.svg)](https://github.com/kannaka-labs/kannaka-crystal/actions/workflows/ci.yml) [![License](https://img.shields.io/badge/license-Space%20Child-blueviolet)]() [![Rust](https://img.shields.io/badge/rust-2021-orange)]() [![NATS](https://img.shields.io/badge/swarm-NATS-green)]()
 
-Part of the [Kannaka](https://github.com/NickFlach/kannaka-memory) ecosystem — the Dream Engine philosophy here is borrowed directly from Kannaka Memory's consolidation cycle.
+Part of the [Kannaka](https://github.com/kannaka-labs/kannaka-memory) ecosystem — the Dream Engine philosophy here is borrowed directly from Kannaka Memory's consolidation cycle.
 
 ---
 
