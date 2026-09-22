@@ -7,7 +7,7 @@ Only the latest tagged release receives security fixes.
 ## Reporting a Vulnerability
 
 Please report vulnerabilities privately via
-[GitHub Security Advisories](https://github.com/flaukowski/kannaka-crystal/security/advisories/new).
+[GitHub Security Advisories](https://github.com/kannaka-labs/kannaka-crystal/security/advisories/new).
 Do not open a public issue for exploitable bugs. You should receive a
 response within a week.
 

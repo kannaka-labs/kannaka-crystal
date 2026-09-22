@@ -195,7 +195,7 @@ its own claims.
 
 ### Sibling
 - **KannakaHDL** lives in its own repo from today:
-  https://github.com/flaukowski/kannaka-hdl — the ADR-0003 Part 2
+  https://github.com/kannaka-labs/kannaka-hdl — the ADR-0003 Part 2
   composition language (grow architectures from this registry's
   primitives), evolving separately.
 
