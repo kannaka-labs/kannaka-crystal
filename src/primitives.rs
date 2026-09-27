@@ -24,6 +24,10 @@ pub enum PrimitiveClass {
     MemorySeed,
     /// No morphological heuristic fired with confidence.
     Unknown,
+    /// A recurring gate construction mined from a circuit op stream
+    /// (ADR-0005). Structural, not morphological: never produced by
+    /// [`detect_structures`].
+    CircuitMotif,
 }
 
 impl std::fmt::Display for PrimitiveClass {
@@ -36,6 +40,7 @@ impl std::fmt::Display for PrimitiveClass {
             PrimitiveClass::AttractorField => "Attractor Field",
             PrimitiveClass::MemorySeed => "Memory Seed",
             PrimitiveClass::Unknown => "Unknown",
+            PrimitiveClass::CircuitMotif => "Circuit Motif",
         };
         write!(f, "{s}")
     }

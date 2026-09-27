@@ -173,6 +173,28 @@ enum Command {
         #[arg(long)]
         total_cap: Option<usize>,
     },
+    /// Mine Circuit Motifs (ADR-0005) from a quantum op stream (ECDSA.fail
+    /// ops.bin framing) and optionally register them as primitives
+    Circuit {
+        /// Path to the op stream (QECCOPSZ zstd or QECCOPS1 raw)
+        file: String,
+        /// Motif lengths to mine, in gates (comma-separated)
+        #[arg(long, value_delimiter = ',', default_values_t = vec![4usize, 8, 16, 32])]
+        windows: Vec<usize>,
+        /// Motifs to report per window
+        #[arg(long, default_value_t = 5)]
+        top: usize,
+        /// Source label recorded on registered motifs (e.g. ecdsafail@5a08ebd)
+        #[arg(long, default_value = "circuit")]
+        label: String,
+        /// Register the reported motifs in the registry
+        #[arg(long)]
+        register: bool,
+        /// Instead of mining: re-mine this file for a registered motif
+        /// (Level 2 evidence, circuit-remine-v1)
+        #[arg(long)]
+        reproduce: Option<String>,
+    },
     /// Run a NATS Explorer agent (requires --features swarm build)
     #[cfg(feature = "swarm")]
     Explore {
@@ -334,6 +356,9 @@ fn dispatch(command: Command) -> Result<(), String> {
             held_out_start,
         } => {
             let mut registry = Registry::load().map_err(|e| e.to_string())?;
+            if let Some(p) = registry.find(&id) {
+                kannaka_crystal::circuit::ensure_field_primitive(p)?;
+            }
             if procedure == "behavior" {
                 let cap = capability.ok_or(
                     "--procedure behavior needs --capability \
@@ -597,6 +622,58 @@ fn dispatch(command: Command) -> Result<(), String> {
                 "pruned {evicted} of {before} primitives ({} remain)",
                 before - evicted
             );
+            Ok(())
+        }
+        Command::Circuit {
+            file,
+            windows,
+            top,
+            label,
+            register,
+            reproduce,
+        } => {
+            use kannaka_crystal::circuit;
+            let (tk, hash) = circuit::load_tokenized(std::path::Path::new(&file))?;
+            println!(
+                "{file}: {} gates (swaps dropped), {} Toffoli, {} distinct recency tokens, blake3 {}",
+                tk.tokens.len(),
+                tk.toffolis,
+                tk.table.len(),
+                &hash[..16]
+            );
+            let mut registry = Registry::load().map_err(|e| e.to_string())?;
+            if let Some(id) = reproduce {
+                let rec = circuit::remine(&mut registry, &id, &tk, &hash)?;
+                registry.save().map_err(|e| e.to_string())?;
+                println!("{} {id}: {}", circuit::REMINE_PROCEDURE, rec.metrics);
+                return Ok(());
+            }
+            let mut added = 0;
+            for w in windows {
+                println!("\nwindow {w}:");
+                for m in circuit::mine(&tk, w, top) {
+                    println!(
+                        "  {:>7} x {} Toffoli = {:>8} ({:>5.1}% of all)  {}",
+                        m.occurrences,
+                        m.toffoli_per_instance,
+                        m.toffoli_covered,
+                        100.0 * m.toffoli_covered as f64 / tk.toffolis.max(1) as f64,
+                        m.spelled().join(" ")
+                    );
+                    if register {
+                        if let Some(p) =
+                            circuit::register_motif(&mut registry, &tk, &m, &label, &hash)
+                        {
+                            println!("          registered {}", p.id);
+                            added += 1;
+                        }
+                    }
+                }
+            }
+            if register {
+                registry.save().map_err(|e| e.to_string())?;
+                println!("\nregistered {added} new Circuit Motif(s)");
+            }
             Ok(())
         }
         #[cfg(feature = "swarm")]

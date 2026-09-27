@@ -14,6 +14,8 @@
 //!   geometries (Echo Rings, Standing Echoes, Phase Knots, Memory Seeds…).
 //! - [`registry`] — the Crystal Registry: persistent identity + lineage.
 //! - [`discovery`] — evolutionary search for novel primitives.
+//! - [`circuit`] — Circuit Motifs: recurring gate constructions mined from a
+//!   quantum/reversible op stream (ADR-0005).
 //! - [`lang`] — the Crystal Language (`.crystal` programs).
 //! - [`api`] — REST API + embedded Observatory.
 //! - `swarm` (feature `swarm`) — NATS agents (Explorer et al.).
@@ -35,6 +37,8 @@ pub mod api;
 pub mod behavior;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod bench;
+#[cfg(not(target_arch = "wasm32"))]
+pub mod circuit;
 #[cfg(not(target_arch = "wasm32"))]
 pub mod discovery;
 #[cfg(not(target_arch = "wasm32"))]

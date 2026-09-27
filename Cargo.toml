@@ -36,6 +36,9 @@ dirs = "5"
 # axum/tokio to keep the default build lean and dependency-light — the API is
 # a research surface, not a high-concurrency service.
 tiny_http = "0.12"
+# Pure-Rust zstd decoder for circuit op streams (ECDSA.fail ops.bin, ADR-0005).
+# Decode-only and C-free, so the default native build stays lean.
+ruzstd = "0.9"
 
 # NATS swarm integration (Explorer/Optimizer/Classifier/Dreamer agents publish
 # and subscribe here). NOT in default features — mirrors kannaka-memory's

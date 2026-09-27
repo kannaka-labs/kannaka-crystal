@@ -66,6 +66,10 @@ pub struct Primitive {
     /// failed tests are evidence too. Absent on pre-Phase-4 rows.
     #[serde(default)]
     pub behavioral_capabilities: Vec<BehavioralCapability>,
+    /// ADR-0005: set only on Circuit Motifs — the authoritative circuit
+    /// numbers behind the field-shaped fields above. Absent elsewhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub circuit: Option<crate::circuit::CircuitMotifMeta>,
 }
 
 fn default_evidence_level() -> u8 {
@@ -298,6 +302,7 @@ impl Registry {
             genome_id: genome.as_ref().map(|(id, _)| *id),
             parent_genome_ids: genome.map(|(_, parents)| parents).unwrap_or_default(),
             behavioral_capabilities: vec![],
+            circuit: None,
         };
         self.primitives.push(prim.clone());
         Some(prim)
