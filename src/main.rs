@@ -187,7 +187,9 @@ enum Command {
         /// Source label recorded on registered motifs (e.g. ecdsafail@5a08ebd)
         #[arg(long, default_value = "circuit")]
         label: String,
-        /// Register the reported motifs in the registry
+        /// Register the reported motifs in circuit_registry.json (beside, not in,
+        /// the field registry). Like any registry write, don't run it against a
+        /// data dir whose swarm agents are live: copy it to a scratch dir first
         #[arg(long)]
         register: bool,
         /// Instead of mining: re-mine this file for a registered motif
@@ -641,10 +643,11 @@ fn dispatch(command: Command) -> Result<(), String> {
                 tk.table.len(),
                 &hash[..16]
             );
-            let mut registry = Registry::load().map_err(|e| e.to_string())?;
+            // Circuit Motifs live in their own registry file (ADR-0005)
+            let mut registry = circuit::load_circuit_registry()?;
             if let Some(id) = reproduce {
                 let rec = circuit::remine(&mut registry, &id, &tk, &hash)?;
-                registry.save().map_err(|e| e.to_string())?;
+                circuit::save_circuit_registry(&registry)?;
                 println!("{} {id}: {}", circuit::REMINE_PROCEDURE, rec.metrics);
                 return Ok(());
             }
@@ -661,18 +664,22 @@ fn dispatch(command: Command) -> Result<(), String> {
                         m.spelled().join(" ")
                     );
                     if register {
-                        if let Some(p) =
-                            circuit::register_motif(&mut registry, &tk, &m, &label, &hash)
-                        {
-                            println!("          registered {}", p.id);
-                            added += 1;
+                        match circuit::register_motif(&mut registry, &tk, &m, &label, &hash) {
+                            Some(p) => {
+                                println!("          registered {}", p.id);
+                                added += 1;
+                            }
+                            None => println!("          already registered (same repeating unit)"),
                         }
                     }
                 }
             }
             if register {
-                registry.save().map_err(|e| e.to_string())?;
-                println!("\nregistered {added} new Circuit Motif(s)");
+                circuit::save_circuit_registry(&registry)?;
+                println!(
+                    "\nregistered {added} new Circuit Motif(s) in {}",
+                    circuit::circuit_registry_path().display()
+                );
             }
             Ok(())
         }

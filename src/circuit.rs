@@ -17,7 +17,7 @@
 //! (u32 kind, u32 pad, u64 q_control2, q_control1, q_target, c_target,
 //! c_condition, r_target; all little-endian).
 
-use crate::primitives::{Classification, DetectedStructure, MorphologyFeatures, PrimitiveClass};
+use crate::primitives::{Classification, MorphologyFeatures, PrimitiveClass};
 use crate::registry::{EvidenceRecord, Primitive, Registry};
 use chrono::Utc;
 use serde::{Deserialize, Serialize};
@@ -77,24 +77,50 @@ pub fn parse_ops(bytes: &[u8]) -> Result<Vec<Op>, String> {
     if bytes.len() < 16 {
         return Err("op stream too short for its header".into());
     }
-    let n = u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes")) as usize;
+    let n = u64::from_le_bytes(bytes[8..16].try_into().expect("8 bytes"));
     match &bytes[..8] {
-        b"QECCOPS1" => read_ops(&bytes[16..], n),
+        b"QECCOPS1" => {
+            // The raw body's size bounds the op count exactly: never trust the header beyond it.
+            let body = (bytes.len() - 16) as u64;
+            if n > body / OP_BYTES as u64 {
+                return Err(format!(
+                    "header claims {n} ops but the body holds {}",
+                    body / OP_BYTES as u64
+                ));
+            }
+            if body != n * OP_BYTES as u64 {
+                return Err(format!(
+                    "{} trailing bytes after {n} ops",
+                    body - n * OP_BYTES as u64
+                ));
+            }
+            read_ops(&bytes[16..], n as usize)
+        }
         b"QECCOPSZ" => {
-            let dec = ruzstd::decoding::StreamingDecoder::new(&bytes[16..])
+            let mut dec = ruzstd::decoding::StreamingDecoder::new(&bytes[16..])
                 .map_err(|e| format!("zstd: {e}"))?;
-            read_ops(dec, n)
+            let ops = read_ops(
+                &mut dec,
+                usize::try_from(n).map_err(|_| "op count overflows usize")?,
+            )?;
+            let mut extra = [0u8; 1];
+            if dec.read(&mut extra).map_err(|e| format!("zstd: {e}"))? != 0 {
+                return Err(format!("trailing data after {n} ops"));
+            }
+            Ok(ops)
         }
         _ => Err("not a QECCOPS op stream (bad magic)".into()),
     }
 }
 
-/// Stream-decode `n` records so the uncompressed body (56 bytes per op,
-/// ~685 MB for the ECDSA.fail record) is never materialised.
+/// Decode `n` records one at a time, so the uncompressed body (56 bytes per
+/// op, ~685 MB for the ECDSA.fail record) is never held in memory; only the
+/// 32-byte `Op` values are kept. The initial allocation is bounded, so a
+/// hostile header cannot reserve memory before any data has been read.
 fn read_ops(mut r: impl Read, n: usize) -> Result<Vec<Op>, String> {
     let u64at = |b: &[u8], o: usize| u64::from_le_bytes(b[o..o + 8].try_into().expect("8 bytes"));
     let mut rec = [0u8; OP_BYTES];
-    let mut ops = Vec::with_capacity(n.min(1 << 26));
+    let mut ops = Vec::with_capacity(n.min(1 << 16));
     for i in 0..n {
         r.read_exact(&mut rec)
             .map_err(|e| format!("truncated at op {i} of {n}: {e}"))?;
@@ -232,51 +258,84 @@ impl Motif {
     }
 }
 
+/// (Toffolis covered, first position, last position, occurrences, token ids,
+/// Toffolis per instance): one ranked window group before it becomes a Motif.
+type Ranked<'a> = (usize, usize, usize, usize, &'a [u32], usize);
+
 /// Mine the `top` motifs of length `window`, ranked by Toffolis covered.
 /// Windows are grouped by exact token content (no hashing shortcuts), so
-/// counts are exact.
+/// counts are exact. Groups are ranked on lightweight tuples first and only
+/// the top ones are turned into [`Motif`]s, so memory stays proportional to
+/// the number of distinct windows, not to `top`.
 pub fn mine(tk: &Tokenized, window: usize, top: usize) -> Vec<Motif> {
     if window == 0 || tk.tokens.len() < window {
         return Vec::new();
     }
+    // positions are pushed in increasing order, which the greedy count relies on
     let mut groups: HashMap<&[u32], Vec<usize>> = HashMap::new();
     for p in 0..=tk.tokens.len() - window {
         if tk.table[tk.tokens[p] as usize].is_toffoli() {
             groups.entry(&tk.tokens[p..p + window]).or_default().push(p);
         }
     }
-    let mut motifs: Vec<Motif> = groups
+    let mut ranked: Vec<Ranked> = groups
         .into_iter()
         .map(|(ids, positions)| {
-            let mut occurrences = 0;
-            let mut next_free = 0;
-            for &p in &positions {
-                if p >= next_free {
-                    occurrences += 1;
-                    next_free = p + window;
-                }
-            }
-            let tokens: Vec<Token> = ids.iter().map(|i| tk.table[*i as usize]).collect();
-            let per = tokens.iter().filter(|t| t.is_toffoli()).count();
-            Motif {
-                window,
-                occurrences,
-                toffoli_per_instance: per,
-                toffoli_covered: occurrences * per,
-                first_position: positions[0],
-                last_position: *positions.last().expect("non-empty group"),
-                tokens,
-            }
+            let occurrences = greedy_count(&positions, window);
+            let per = ids
+                .iter()
+                .filter(|i| tk.table[**i as usize].is_toffoli())
+                .count();
+            let last = *positions.last().expect("non-empty group");
+            (occurrences * per, positions[0], last, occurrences, ids, per)
         })
         .collect();
     // Deterministic order: coverage, then earliest appearance.
-    motifs.sort_by(|a, b| {
-        b.toffoli_covered
-            .cmp(&a.toffoli_covered)
-            .then(a.first_position.cmp(&b.first_position))
-    });
-    motifs.truncate(top);
-    motifs
+    ranked.sort_by(|a, b| b.0.cmp(&a.0).then(a.1.cmp(&b.1)));
+    ranked.truncate(top);
+    ranked
+        .into_iter()
+        .map(|(covered, first, last, occurrences, ids, per)| Motif {
+            window,
+            tokens: ids.iter().map(|i| tk.table[*i as usize]).collect(),
+            occurrences,
+            toffoli_per_instance: per,
+            toffoli_covered: covered,
+            first_position: first,
+            last_position: last,
+        })
+        .collect()
+}
+
+/// Non-overlapping instances among sorted start positions, left to right.
+fn greedy_count(positions: &[usize], window: usize) -> usize {
+    let (mut n, mut next_free) = (0, 0);
+    for &p in positions {
+        if p >= next_free {
+            n += 1;
+            next_free = p + window;
+        }
+    }
+    n
+}
+
+/// Count one given token sequence directly (used by [`remine`]): no full mine.
+/// Returns (occurrences, Toffolis covered).
+pub fn count_motif(tk: &Tokenized, tokens: &[Token]) -> (usize, usize) {
+    let ids: Option<Vec<u32>> = tokens
+        .iter()
+        .map(|t| tk.table.iter().position(|x| x == t).map(|i| i as u32))
+        .collect();
+    let Some(ids) = ids else { return (0, 0) };
+    let w = ids.len();
+    if w == 0 || tk.tokens.len() < w {
+        return (0, 0);
+    }
+    let positions: Vec<usize> = (0..=tk.tokens.len() - w)
+        .filter(|&p| tk.tokens[p..p + w] == ids[..])
+        .collect();
+    let occ = greedy_count(&positions, w);
+    (occ, occ * tokens.iter().filter(|t| t.is_toffoli()).count())
 }
 
 /// Circuit-specific metadata carried on a registered Circuit Motif.
@@ -301,8 +360,8 @@ const KIND_BINS: [u32; 8] = MINED_KINDS;
 
 /// 256-bin L2-normalised composition signature (kind x target rank x first
 /// control rank), comparable with [`crate::primitives::signature_similarity`].
-/// It is rotation-invariant by construction, so the same cycle anchored at
-/// a different Toffoli deduplicates to one primitive.
+/// It ignores gate ORDER, so it is used only to rank similar motifs, never to
+/// decide identity: that is [`canonical_unit`].
 pub fn signature(tokens: &[Token]) -> Vec<f64> {
     let mut sig = vec![0.0; 256];
     for t in tokens {
@@ -322,8 +381,60 @@ pub fn signature(tokens: &[Token]) -> Vec<f64> {
     sig
 }
 
+/// Identity of a motif: its smallest repeating block, in its lexicographically
+/// least rotation. A run of one motif at a longer window, or the same cycle
+/// anchored at a different Toffoli, reduces to the same unit; motifs that
+/// differ in gate order or in any operand rank do not.
+pub fn canonical_unit(tokens: &[Token]) -> Vec<Token> {
+    let n = tokens.len();
+    let key = |t: &Token| (t.kind, t.r2, t.r1, t.rt);
+    let p = (1..=n)
+        .find(|&p| n.is_multiple_of(p) && (p..n).all(|i| tokens[i] == tokens[i - p]))
+        .unwrap_or(n);
+    let unit = &tokens[..p];
+    (0..p)
+        .map(|r| {
+            unit[r..]
+                .iter()
+                .chain(&unit[..r])
+                .copied()
+                .collect::<Vec<_>>()
+        })
+        .min_by(|a, b| a.iter().map(key).cmp(b.iter().map(key)))
+        .unwrap_or_default()
+}
+
+/// Circuit Motifs live in their own file beside the field registry
+/// (ADR-0005): older binaries, field discovery, the `.crystal` language and
+/// registry pruning never see them.
+pub fn circuit_registry_path() -> std::path::PathBuf {
+    crate::registry::data_dir().join("circuit_registry.json")
+}
+
+pub fn load_circuit_registry() -> Result<Registry, String> {
+    let path = circuit_registry_path();
+    if !path.exists() {
+        return Ok(Registry::default());
+    }
+    let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
+}
+
+pub fn save_circuit_registry(reg: &Registry) -> Result<(), String> {
+    let path = circuit_registry_path();
+    let dir = path.parent().expect("data dir");
+    std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
+    let tmp = dir.join("circuit_registry.json.tmp");
+    std::fs::write(
+        &tmp,
+        serde_json::to_string_pretty(reg).map_err(|e| e.to_string())?,
+    )
+    .map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+}
+
 /// Register a motif. Returns `None` if the registry already holds a Circuit
-/// Motif with the same composition (similarity >= 0.92).
+/// Motif with the same [`canonical_unit`].
 ///
 /// Field-shaped [`Primitive`] fields are filled with structural analogues,
 /// documented in ADR-0005: persistence and stability = share of all
@@ -338,6 +449,15 @@ pub fn register_motif(
     source: &str,
     source_hash: &str,
 ) -> Option<Primitive> {
+    let unit = canonical_unit(&motif.tokens);
+    let duplicate = registry.primitives.iter().any(|p| {
+        p.circuit
+            .as_ref()
+            .is_some_and(|m| canonical_unit(&m.tokens) == unit)
+    });
+    if duplicate {
+        return None;
+    }
     let len = tk.tokens.len().max(1) as f64;
     let share = motif.toffoli_covered as f64 / tk.toffolis.max(1) as f64;
     let distinct = {
@@ -346,9 +466,34 @@ pub fn register_motif(
         v.dedup();
         v.len()
     };
-    let detected = DetectedStructure {
+    let unit_bytes = serde_json::to_vec(&unit).expect("tokens serialize");
+    registry.next_serial += 1;
+    let prim = Primitive {
+        id: format!("CRY-{:06}", registry.next_serial),
+        uuid: uuid::Uuid::new_v4(),
+        hash: blake3::hash(&unit_bytes).to_hex().to_string(),
         class: PrimitiveClass::CircuitMotif,
-        classification: Classification {
+        persistence: share,
+        noise_tolerance: 0.0,
+        stability_score: share,
+        energy_profile: motif
+            .tokens
+            .iter()
+            .map(|t| if t.is_toffoli() { 1.0 } else { 0.0 })
+            .collect(),
+        material_id: format!("circuit:{source}"),
+        centroid: (
+            motif.first_position as f64 / len,
+            motif.last_position as f64 / len,
+        ),
+        area: motif.window,
+        signature: signature(&motif.tokens),
+        lineage: vec![],
+        discovered_at: Utc::now(),
+        provenance: format!("{MINER_VERSION} window {} from {source}", motif.window),
+        experiment_id: None,
+        experiment_hash: None,
+        classification: Some(Classification {
             display_class: PrimitiveClass::CircuitMotif.to_string(),
             primitive_domain: "structural-circuit".into(),
             classifier_version: MINER_VERSION.into(),
@@ -362,47 +507,28 @@ pub fn register_motif(
                 occupied_bins: distinct,
                 stability_ratio: motif.occurrences as f64,
             },
-        },
-        centroid: (
-            motif.first_position as f64 / len,
-            motif.last_position as f64 / len,
-        ),
-        area: motif.window,
-        stability_score: share,
-        signature: signature(&motif.tokens),
+        }),
+        evidence_level: 1,
+        evidence_records: vec![],
+        genome_id: None,
+        parent_genome_ids: vec![],
+        behavioral_capabilities: vec![],
+        circuit: Some(CircuitMotifMeta {
+            miner_version: MINER_VERSION.into(),
+            source: source.into(),
+            source_hash: source_hash.into(),
+            gates_total: tk.tokens.len(),
+            toffoli_total: tk.toffolis,
+            window: motif.window,
+            tokens: motif.tokens.clone(),
+            spelled: motif.spelled(),
+            occurrences: motif.occurrences,
+            toffoli_per_instance: motif.toffoli_per_instance,
+            toffoli_covered: motif.toffoli_covered,
+        }),
     };
-    let energy: Vec<f64> = motif
-        .tokens
-        .iter()
-        .map(|t| if t.is_toffoli() { 1.0 } else { 0.0 })
-        .collect();
-    let prim = registry.register(
-        &detected,
-        share,
-        0.0,
-        energy,
-        &format!("circuit:{source}"),
-        vec![],
-        &format!("{MINER_VERSION} window {} from {source}", motif.window),
-        None,
-        None,
-    )?;
-    let meta = CircuitMotifMeta {
-        miner_version: MINER_VERSION.into(),
-        source: source.into(),
-        source_hash: source_hash.into(),
-        gates_total: tk.tokens.len(),
-        toffoli_total: tk.toffolis,
-        window: motif.window,
-        tokens: motif.tokens.clone(),
-        spelled: motif.spelled(),
-        occurrences: motif.occurrences,
-        toffoli_per_instance: motif.toffoli_per_instance,
-        toffoli_covered: motif.toffoli_covered,
-    };
-    let stored = registry.find_mut(&prim.id).expect("just registered");
-    stored.circuit = Some(meta);
-    Some(stored.clone())
+    registry.primitives.push(prim.clone());
+    Some(prim)
 }
 
 /// Circuit motifs are not field structures: the physics evidence procedures
@@ -419,8 +545,12 @@ pub fn ensure_field_primitive(p: &Primitive) -> Result<(), String> {
     Ok(())
 }
 
-/// Level 2 for circuit motifs: re-mine the same source bytes and require the
-/// motif to reappear with identical counts. A mismatch demotes to Level 1.
+/// Level 2 for circuit motifs: an independent re-run of the recorded procedure
+/// on the same source bytes must reproduce the recorded counts. Mining is
+/// deterministic, so on unchanged bytes this is a check that the claim and the
+/// miner still agree (it catches a changed miner, a hand-edited row, or a row
+/// attached to the wrong stream), not a statistical replication. A mismatch
+/// demotes to Level 1, and the record says whether the miner version changed.
 pub fn remine(
     registry: &mut Registry,
     id: &str,
@@ -440,13 +570,7 @@ pub fn remine(
             meta.source, meta.source_hash
         ));
     }
-    let found = mine(tk, meta.window, usize::MAX)
-        .into_iter()
-        .find(|m| m.tokens == meta.tokens);
-    let (occ, covered) = found
-        .as_ref()
-        .map(|m| (m.occurrences, m.toffoli_covered))
-        .unwrap_or((0, 0));
+    let (occ, covered) = count_motif(tk, &meta.tokens);
     let success = occ == meta.occurrences && covered == meta.toffoli_covered;
     let record = EvidenceRecord {
         level: 2,
@@ -458,6 +582,8 @@ pub fn remine(
             "toffoli_covered": covered,
             "expected_toffoli_covered": meta.toffoli_covered,
             "source_hash": source_hash,
+            "miner_version_recorded": meta.miner_version,
+            "miner_version_now": MINER_VERSION,
         }),
         at: Utc::now(),
         node: std::env::var("KANNAKA_CRYSTAL_NODE").unwrap_or_else(|_| "local".into()),
@@ -527,6 +653,45 @@ mod tests {
     }
 
     #[test]
+    fn hostile_header_and_trailing_bytes_are_rejected_without_allocating() {
+        // 16 bytes claiming u64::MAX ops: must fail fast, not reserve memory.
+        let mut hostile = b"QECCOPS1".to_vec();
+        hostile.extend(u64::MAX.to_le_bytes());
+        assert!(parse_ops(&hostile).unwrap_err().contains("header claims"));
+        let mut extra = encode(&step(1, 2, 3));
+        extra.push(0);
+        assert!(parse_ops(&extra).unwrap_err().contains("trailing"));
+    }
+
+    #[test]
+    fn identity_is_the_repeating_unit_not_the_composition() {
+        let t = |kind, r1, rt| Token {
+            kind,
+            r2: ABSENT,
+            r1,
+            rt,
+        };
+        let a = t(kind::CCX, 1, RECENCY_CAP);
+        let b = t(kind::CX, 3, 1);
+        let c = t(kind::CX, 0, RECENCY_CAP);
+        // same gates, different order: same composition signature, different motif
+        assert_eq!(signature(&[a, b, c]), signature(&[a, c, b]));
+        assert_ne!(canonical_unit(&[a, b, c]), canonical_unit(&[a, c, b]));
+        // a rotation, and a run of the same unit, are the same motif
+        assert_eq!(canonical_unit(&[a, b, c]), canonical_unit(&[b, c, a]));
+        assert_eq!(
+            canonical_unit(&[a, b, c, a, b, c]),
+            canonical_unit(&[a, b, c])
+        );
+    }
+
+    #[test]
+    fn a_registry_with_an_unknown_class_still_loads() {
+        let v: PrimitiveClass = serde_json::from_str("\"SomeFutureClass\"").unwrap();
+        assert_eq!(v, PrimitiveClass::Unknown);
+    }
+
+    #[test]
     fn recency_coding_is_register_independent() {
         // Warm both runs up the same way, then place the step far apart.
         let mut near = step(1, 2, 3);
@@ -569,7 +734,7 @@ mod tests {
     }
 
     #[test]
-    fn registration_dedupes_rotations_and_remine_promotes() {
+    fn registration_dedupes_the_same_unit_and_remine_promotes() {
         let mut ops = Vec::new();
         for i in 0..20u64 {
             ops.extend(step(3 * i, 3 * i + 1, 3 * i + 2));

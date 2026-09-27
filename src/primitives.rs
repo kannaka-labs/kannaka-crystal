@@ -22,12 +22,15 @@ pub enum PrimitiveClass {
     AttractorField,
     /// Small, very dense, very stable kernel.
     MemorySeed,
-    /// No morphological heuristic fired with confidence.
-    Unknown,
     /// A recurring gate construction mined from a circuit op stream
     /// (ADR-0005). Structural, not morphological: never produced by
     /// [`detect_structures`].
     CircuitMotif,
+    /// No morphological heuristic fired with confidence. Also the landing
+    /// spot for any class name this build doesn't know (`serde(other)`), so a
+    /// registry written by a newer build still loads.
+    #[serde(other)]
+    Unknown,
 }
 
 impl std::fmt::Display for PrimitiveClass {
