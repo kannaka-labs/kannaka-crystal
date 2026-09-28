@@ -130,6 +130,7 @@ mod tests {
             genome_id: None,
             parent_genome_ids: vec![],
             behavioral_capabilities: vec![],
+            circuit: None,
         }
     }
 
