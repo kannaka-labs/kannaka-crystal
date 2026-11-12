@@ -215,6 +215,31 @@ pub fn data_dir() -> PathBuf {
         .join(".kannaka-crystal")
 }
 
+/// Write `bytes` to `tmp`, flush them to disk, then rename over `dest`.
+///
+/// The flush is the point: a rename without it can survive a crash while the
+/// file's contents do not, leaving a zero-byte `dest`.
+pub(crate) fn write_durable(
+    tmp: &std::path::Path,
+    dest: &std::path::Path,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    use std::io::Write;
+    let mut f = std::fs::File::create(tmp)?;
+    f.write_all(bytes)?;
+    f.sync_all()?;
+    drop(f);
+    std::fs::rename(tmp, dest)?;
+    // Best effort: persist the rename itself. Opening a directory for sync is
+    // not supported on every platform, so a failure here is not an error.
+    if let Some(dir) = dest.parent() {
+        if let Ok(d) = std::fs::File::open(dir) {
+            let _ = d.sync_all();
+        }
+    }
+    Ok(())
+}
+
 fn registry_path() -> PathBuf {
     data_dir().join("registry.json")
 }
@@ -225,7 +250,17 @@ impl Registry {
         if !path.exists() {
             return Ok(Registry::default());
         }
-        let text = std::fs::read_to_string(path)?;
+        let text = std::fs::read_to_string(&path)?;
+        // A zero-byte registry is what an unflushed save leaves behind when the
+        // host goes down. Treat it as "no registry yet" instead of failing every
+        // start (crystal-o1 looped on this for 27 days, 2026-10-16 to 2026-11-12).
+        if text.trim().is_empty() {
+            eprintln!(
+                "warning: {} is empty (interrupted save?) — starting with an empty registry",
+                path.display()
+            );
+            return Ok(Registry::default());
+        }
         Ok(serde_json::from_str(&text)?)
     }
 
@@ -234,8 +269,11 @@ impl Registry {
         std::fs::create_dir_all(&dir)?;
         // Write-then-rename so a crash mid-save can't corrupt the registry.
         let tmp = dir.join("registry.json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self)?)?;
-        std::fs::rename(&tmp, registry_path())?;
+        write_durable(
+            &tmp,
+            &registry_path(),
+            serde_json::to_string_pretty(self)?.as_bytes(),
+        )?;
         Ok(())
     }
 
@@ -676,5 +714,17 @@ mod tests {
         r.register(&b, 0.9, 0.8, vec![], "silicon", vec![], "t", None, None);
         let hits = r.similar(&a.signature, 2);
         assert!(hits[0].0 > 0.999);
+    }
+
+    #[test]
+    fn write_durable_replaces_dest_and_leaves_no_tmp() {
+        let dir = std::env::temp_dir().join(format!("kc-durable-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let (tmp, dest) = (dir.join("r.json.tmp"), dir.join("r.json"));
+        std::fs::write(&dest, "old").unwrap();
+        write_durable(&tmp, &dest, b"{\"new\":1}").unwrap();
+        assert_eq!(std::fs::read_to_string(&dest).unwrap(), "{\"new\":1}");
+        assert!(!tmp.exists());
+        std::fs::remove_dir_all(&dir).ok();
     }
 }

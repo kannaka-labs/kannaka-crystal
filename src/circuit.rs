@@ -417,6 +417,14 @@ pub fn load_circuit_registry() -> Result<Registry, String> {
         return Ok(Registry::default());
     }
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+    // Same rule as the field registry: an empty file is an interrupted save.
+    if text.trim().is_empty() {
+        eprintln!(
+            "warning: {} is empty (interrupted save?) — starting with an empty circuit registry",
+            path.display()
+        );
+        return Ok(Registry::default());
+    }
     serde_json::from_str(&text).map_err(|e| format!("{}: {e}", path.display()))
 }
 
@@ -425,12 +433,8 @@ pub fn save_circuit_registry(reg: &Registry) -> Result<(), String> {
     let dir = path.parent().expect("data dir");
     std::fs::create_dir_all(dir).map_err(|e| e.to_string())?;
     let tmp = dir.join("circuit_registry.json.tmp");
-    std::fs::write(
-        &tmp,
-        serde_json::to_string_pretty(reg).map_err(|e| e.to_string())?,
-    )
-    .map_err(|e| e.to_string())?;
-    std::fs::rename(&tmp, &path).map_err(|e| e.to_string())
+    let text = serde_json::to_string_pretty(reg).map_err(|e| e.to_string())?;
+    crate::registry::write_durable(&tmp, &path, text.as_bytes()).map_err(|e| e.to_string())
 }
 
 /// Register a motif. Returns `None` if the registry already holds a Circuit
